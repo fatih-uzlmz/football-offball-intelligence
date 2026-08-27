@@ -19,8 +19,17 @@ Research prototype — not affiliated with any club.
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+# fetch free Metrica Sports sample tracking data (~64MB)
+mkdir -p data/raw && cd data/raw
+for f in Sample_Game_1_RawTrackingData_Home_Team.csv \
+         Sample_Game_1_RawTrackingData_Away_Team.csv \
+         Sample_Game_1_RawEventsData.csv; do
+  curl -sL -o "$f" "https://raw.githubusercontent.com/metrica-sports/sample-data/master/data/Sample_Game_1/$f"
+done && cd ../..
 .venv/bin/python scripts/build_trajectories.py --game Sample_Game_1
-.venv/bin/python scripts/plot_frame.py --game Sample_Game_1 --frame 30000
+.venv/bin/python scripts/build_possessions.py --game Sample_Game_1
+.venv/bin/python scripts/detect_runs.py --game Sample_Game_1
+.venv/bin/python scripts/plot_run.py --rank 4
 ```
 
 ## Status
