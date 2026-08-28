@@ -28,9 +28,15 @@ SMOOTH = 13        # velocity smoothing window (~0.5s)
 AFTER_S = 5.0      # outcome window
 
 
-def attack_dir(team: str, period: int) -> int:
-    # measured: p1 home +x / away -x, p2 swapped
-    return 1 if (team == "home") == (period == 1) else -1
+def attack_dirs(df: pd.DataFrame, poss: pd.DataFrame) -> dict:
+    """Empirical attack direction per (period, team): sign of mean ball dx."""
+    ball = df[df["team"] == "ball"].set_index("frame")["x"]
+    pmap = df[["frame", "period"]].drop_duplicates().set_index("frame")["period"]
+    dirs = {}
+    for (period, team), g in poss.groupby([poss["start_frame"].map(pmap), "team"]):
+        dx = (g["end_frame"].map(ball) - g["start_frame"].map(ball)).mean()
+        dirs[(int(period), team)] = 1 if dx >= 0 else -1
+    return dirs
 
 
 def add_velocity(df: pd.DataFrame) -> pd.DataFrame:
@@ -47,7 +53,8 @@ def add_velocity(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def runs_in_possession(seg: pd.DataFrame, carriers: pd.DataFrame,
-                       possession_id: int, team: str, period: int) -> list:
+                       possession_id: int, team: str, period: int,
+                       adirs: dict) -> list:
     out = []
     cframes = set(carriers.loc[
         (carriers["frame"] >= seg["frame"].min()) &
@@ -55,7 +62,7 @@ def runs_in_possession(seg: pd.DataFrame, carriers: pd.DataFrame,
         (carriers["carrier_team"] == team), "frame"])
     # carrier identity per frame
     cmap = carriers.set_index("frame")["carrier_id"]
-    adir = attack_dir(team, period)
+    adir = adirs.get((period, team), 1)
     opp = "away" if team == "home" else "home"
     for pid, g in seg[seg["team"] == team].groupby("player_id"):
         g = g.sort_values("frame").reset_index(drop=True)
@@ -151,13 +158,14 @@ def main(game: str):
     carriers = pd.read_parquet(ROOT / "data" / "trajectories" / f"{game}_carriers.parquet")
     vel = add_velocity(df)
     pmap = df[["frame", "period"]].drop_duplicates().set_index("frame")["period"]
+    adirs = attack_dirs(df, poss)
 
     all_runs = []
     for _, p in poss.iterrows():
         seg = vel[(vel["frame"] >= p["start_frame"]) & (vel["frame"] <= p["end_frame"])]
         period = int(pmap.get(p["start_frame"], 1))
         all_runs += runs_in_possession(seg, carriers, int(p["possession_id"]),
-                                       p["team"], period)
+                                       p["team"], period, adirs)
     runs = pd.DataFrame(all_runs)
     if not runs.empty:
         runs = add_outcomes(runs, game)
