@@ -14,9 +14,11 @@ from visualization.pitch import (AWAY_COLOR, HOME_COLOR, L, W, draw_pitch,
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def main(game: str, rank: int, out: str):
-    runs = pd.read_parquet(ROOT / "data" / "trajectories" / f"{game}_runs.parquet")
-    runs = runs.sort_values("defender_displacement_m", ascending=False).reset_index(drop=True)
+def main(game: str, rank: int, out: str, sort: str, scored: bool):
+    rp = (ROOT / "data" / "trajectories" / f"{game}_runs_scored.parquet"
+          if scored else ROOT / "data" / "trajectories" / f"{game}_runs.parquet")
+    runs = pd.read_parquet(rp)
+    runs = runs.sort_values(sort, ascending=False).reset_index(drop=True)
     r = runs.iloc[rank]
     df = pd.read_parquet(ROOT / "data" / "trajectories" / f"{game}.parquet")
     seg = df[(df["frame"] >= r["start_frame"]) & (df["frame"] <= r["end_frame"])].copy()
@@ -61,11 +63,16 @@ def main(game: str, rank: int, out: str):
                 f"def #{r['nearest_def_id']}", color="white", fontsize=11,
                 weight="bold", zorder=7)
 
-    style(ax, f"run #{rank}: #{r['runner']} ({team}) dragged defender "
-               f"{r['defender_displacement_m']:.1f}m  |  "
-               f"space {r['space_before_m']:.1f}m → {r['space_after_m']:.1f}m  |  "
-               f"{r['duration_s']:.1f}s @ {r['peak_speed']:.1f} m/s"
-               + ("  |  SHOT followed" if r["shot_within_5s"] else ""))
+    title = (f"run #{rank}: #{r['runner']} ({team}) dragged defender "
+             f"{r['defender_displacement_m']:.1f}m  |  "
+             f"space {r['space_before_m']:.1f}m → {r['space_after_m']:.1f}m  |  "
+             f"{r['duration_s']:.1f}s @ {r['peak_speed']:.1f} m/s")
+    if "value_gained" in r and pd.notna(r["value_gained"]):
+        title += (f"  |  value {r['value_before']:.2f} → {r['value_after']:.2f} "
+                  f"(+{r['value_gained']:.2f})")
+    if r["shot_within_5s"]:
+        title += "  |  SHOT followed"
+    style(ax, title)
     outp = ROOT / out
     outp.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(outp, dpi=130, bbox_inches="tight")
@@ -79,6 +86,10 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--game", default="Sample_Game_1")
     ap.add_argument("--rank", type=int, default=4,
-                    help="rank by defender displacement (0 = top)")
+                    help="rank by --sort metric (0 = top)")
+    ap.add_argument("--sort", default="defender_displacement_m")
+    ap.add_argument("--scored", action="store_true",
+                    help="use the value-scored runs table")
     ap.add_argument("--out", default="reports/run_sample.png")
-    main(**vars(ap.parse_args()))
+    a = ap.parse_args()
+    main(a.game, a.rank, a.out, a.sort, a.scored)
