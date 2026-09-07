@@ -14,13 +14,8 @@ from visualization.pitch import (AWAY_COLOR, HOME_COLOR, L, W, draw_pitch,
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def main(game: str, rank: int, out: str, sort: str, scored: bool):
-    rp = (ROOT / "data" / "trajectories" / f"{game}_runs_scored.parquet"
-          if scored else ROOT / "data" / "trajectories" / f"{game}_runs.parquet")
-    runs = pd.read_parquet(rp)
-    runs = runs.sort_values(sort, ascending=False).reset_index(drop=True)
-    r = runs.iloc[rank]
-    df = pd.read_parquet(ROOT / "data" / "trajectories" / f"{game}.parquet")
+def plot_row(r, df, out, rank_label=""):
+    """Render a single run row `r` against game trajectories `df`."""
     seg = df[(df["frame"] >= r["start_frame"]) & (df["frame"] <= r["end_frame"])].copy()
     seg["xm"], seg["ym"] = seg["x"] * L, seg["y"] * W
 
@@ -63,7 +58,7 @@ def main(game: str, rank: int, out: str, sort: str, scored: bool):
                 f"def #{r['nearest_def_id']}", color="white", fontsize=11,
                 weight="bold", zorder=7)
 
-    title = (f"run #{rank}: #{r['runner']} ({team}) dragged defender "
+    title = (f"{rank_label}#{r['runner']} ({team}) dragged defender "
              f"{r['defender_displacement_m']:.1f}m  |  "
              f"space {r['space_before_m']:.1f}m → {r['space_after_m']:.1f}m  |  "
              f"{r['duration_s']:.1f}s @ {r['peak_speed']:.1f} m/s")
@@ -76,7 +71,18 @@ def main(game: str, rank: int, out: str, sort: str, scored: bool):
     outp = ROOT / out
     outp.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(outp, dpi=130, bbox_inches="tight")
+    plt.close(fig)
     print(f"saved {outp}")
+
+
+def main(game: str, rank: int, out: str, sort: str, scored: bool):
+    rp = (ROOT / "data" / "trajectories" / f"{game}_runs_scored.parquet"
+          if scored else ROOT / "data" / "trajectories" / f"{game}_runs.parquet")
+    runs = pd.read_parquet(rp)
+    runs = runs.sort_values(sort, ascending=False).reset_index(drop=True)
+    r = runs.iloc[rank]
+    df = pd.read_parquet(ROOT / "data" / "trajectories" / f"{game}.parquet")
+    plot_row(r, df, out, rank_label=f"run #{rank}: ")
     print(r[["runner", "team", "duration_s", "path_m", "peak_speed",
              "defender_displacement_m", "space_before_m", "space_after_m",
              "behind_line_after", "shot_within_5s"]].to_string())
