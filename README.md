@@ -40,4 +40,8 @@ done && cd ../..
 - [ ] Possession segmentation + ball-carrier estimation
 - [x] Heuristic run detector (Phase 3: 960 runs, geometry before/after)
 - [ ] Defender-displacement metric (Phase 4 MVP)
-- [ ] PyTorch value model (Phase 5)
+- [x] PyTorch value model (Phase 5: LSTM, val AUC 0.944)
+- [x] Run scoring: OffBallValue = V(after) - V(before) for ~1,400 runs
+- [x] Tactical search engine (Phase 6: `scripts/search_runs.py` — filter,
+  rank, and render runs by tactical criteria)
+- [ ] Pressing module (Phase 7)
