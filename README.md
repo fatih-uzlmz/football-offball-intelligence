@@ -44,4 +44,6 @@ done && cd ../..
 - [x] Run scoring: OffBallValue = V(after) - V(before) for ~1,400 runs
 - [x] Tactical search engine (Phase 6: `scripts/search_runs.py` — filter,
   rank, and render runs by tactical criteria)
-- [ ] Pressing module (Phase 7)
+- [x] Pressing module (Phase 7: `scripts/detect_presses.py` — 883 presses,
+  reaction time, pressers, forced-turnover rate; `scripts/plot_press.py`)
+- [ ] Video pipeline (tracking from raw match video)
