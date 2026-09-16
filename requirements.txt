@@ -1,0 +1,9 @@
+pandas
+pyarrow
+numpy
+matplotlib
+torch
+torchvision
+ultralytics
+opencv-python-headless
+scikit-learn
