@@ -46,4 +46,6 @@ done && cd ../..
   rank, and render runs by tactical criteria)
 - [x] Pressing module (Phase 7: `scripts/detect_presses.py` — 883 presses,
   reaction time, pressers, forced-turnover rate; `scripts/plot_press.py`)
-- [ ] Video pipeline (tracking from raw match video)
+- [x] Video pipeline V1 (detection + ByteTrack + team colors validated on
+  real footage; `src/video/`, `scripts/video_to_trajectories.py`)
+- [ ] Auto calibration (learned pitch-keypoint model) + wide-shot validation
