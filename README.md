@@ -56,4 +56,7 @@ done && cd ../..
 - [x] Graph-attention value model V2 (`src/models/graph_value.py`, `models/graph_value.pt` —
   per-frame player self-attention + 3 targets: shot 0.978 / box entry 0.962 /
   line break 0.687 val AUC; see `reports/GRAPH_MODEL.md`)
-- [ ] Auto calibration (learned pitch-keypoint model) + wide-shot validation
+- [x] Auto calibration V2 (`src/calibration/` — pretrained PnLCalib keypoint/line
+  detectors -> per-frame homography + temporal smoothing, no manual points;
+  `--auto-calib` in `scripts/video_to_trajectories.py`; validated on 60
+  SoccerNet frames: 67% success, median 0.16m error; see `reports/CALIBRATION.md`)

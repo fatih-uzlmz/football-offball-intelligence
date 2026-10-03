@@ -3,9 +3,12 @@
   python scripts/video_to_trajectories.py --video clip.mp4 --preview reports/video/track_preview.jpg
 
 With --calib correspondences.json, foot points are projected to pitch
-meters and the result is written as a parquet in the project's trajectory
-schema (period, frame, time, player_id, team, x, y), ready for the whole
-downstream pipeline (possessions, runs, value model, search, pressing).
+meters (manual V1 calibration). With --auto-calib, the pitch homography
+is estimated automatically per sampled frame with the pretrained
+PnLCalib keypoint/line detectors + temporal smoothing (V2, no manual
+points needed). Either way the result is written as a parquet in the
+project's trajectory schema (period, frame, time, player_id, team, x, y),
+ready for the whole downstream pipeline.
 """
 import argparse
 import json
@@ -20,8 +23,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from video.detection import Tracker
 from video.teams import TeamAssigner, jersey_color
 from video.calibration import Homography
+from calibration.pnlcalib_wrapper import Calibrator, apply_homography
+from calibration.smooth import HomographySmoother
 
 ROOT = Path(__file__).resolve().parents[1]
+CAL_W, CAL_H = 960, 540
 
 
 def annotate(frame, dets, teams):
@@ -83,16 +89,46 @@ def main(a):
     cv2.imwrite(str(outp), prev)
     print(f"preview -> {outp} (frame {bi})")
 
-    if a.calib:
-        H = Homography.from_json(a.calib)
+    if a.calib or a.auto_calib:
+        if a.calib:
+            H = Homography.from_json(a.calib)
+            project = lambda pts: H.project(pts)
+            frame_H = None
+        else:
+            cal = Calibrator(a.weights_kp, a.weights_line, device="cpu")
+            smoother = HomographySmoother(alpha=0.35)
+            h0, w0 = frames[0].shape[:2]
+            # scale: detection pixels -> 960x540 calibration space
+            S = np.array([[CAL_W / w0, 0, 0], [0, CAL_H / h0, 0], [0, 0, 1.0]])
+            frame_H = []
+            for fidx, frame in enumerate(frames):
+                if fidx % a.calib_stride == 0:
+                    Hc, n_kp = cal.calibrate(frame)
+                    Hs = smoother.update(Hc)
+                    print(f"  calib frame {fidx}: "
+                          f"{'ok' if Hc is not None else 'FAIL'} n_kp={n_kp}", flush=True)
+                else:
+                    Hs = smoother.H
+                frame_H.append(None if Hs is None else Hs @ S)
+            n_ok = sum(1 for h in frame_H if h is not None)
+            print(f"auto-calib: {n_ok}/{len(frames)} frames have a homography")
+            project = None  # per-frame below
         rows = []
         for fidx, dets in enumerate(all_dets):
+            Hf = frame_H[fidx] if a.auto_calib else None
+            if a.auto_calib and Hf is None:
+                continue  # no calibration for this frame: skip, don't fabricate
             for d in dets:
                 if d["cls"] == "ball":
                     team, pid = "ball", "ball"
                 else:
                     team, pid = teams.get(d["track_id"], "away"), str(d["track_id"])
-                xm, ym = H.project([Tracker.foot_point(d["xyxy"])])[0]
+                if a.auto_calib:
+                    xm, ym = apply_homography(Hf, [Tracker.foot_point(d["xyxy"])])[0]
+                else:
+                    xm, ym = project([Tracker.foot_point(d["xyxy"])])[0]
+                if np.isnan(xm):
+                    continue
                 rows.append({"period": 1, "frame": fidx + 1,
                              "time": (fidx + 1) / fps, "player_id": pid,
                              "team": team, "x": xm / 105.0, "y": ym / 68.0})
@@ -109,7 +145,13 @@ if __name__ == "__main__":
     ap.add_argument("--model", default="yolov8n.pt")
     ap.add_argument("--max-frames", type=int, default=0)
     ap.add_argument("--calib", default=None,
-                    help="JSON with image/pitch point correspondences")
+                    help="JSON with image/pitch point correspondences (manual V1)")
+    ap.add_argument("--auto-calib", action="store_true",
+                    help="estimate the homography automatically (PnLCalib V2)")
+    ap.add_argument("--calib-stride", type=int, default=15,
+                    help="run the detector every N frames for --auto-calib")
+    ap.add_argument("--weights-kp", default=str(Path.home() / "workspace/pnlcalib/weights/SV_kp"))
+    ap.add_argument("--weights-line", default=str(Path.home() / "workspace/pnlcalib/weights/SV_lines"))
     ap.add_argument("--out", default="data/trajectories/video_clip.parquet")
     ap.add_argument("--preview", default="reports/video/track_preview.jpg")
     main(ap.parse_args())
