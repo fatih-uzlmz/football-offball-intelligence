@@ -81,6 +81,9 @@ def main(games, epochs=15, batch=128, lr=1e-3):
     n_params = sum(p.numel() for p in model.parameters())
     print(f"params={n_params:,}  device={device}")
 
+    out = ROOT / "models"
+    out.mkdir(exist_ok=True)
+    best = {"shot": 0.0}
     for ep in range(1, epochs + 1):
         model.train()
         tot, n = 0.0, 0
@@ -96,20 +99,27 @@ def main(games, epochs=15, batch=128, lr=1e-3):
         with torch.no_grad():
             pv = torch.sigmoid(model(Xva_t)).cpu().numpy()
         aucs = []
+        auc_vals = {}
         for i, t in enumerate(TARGETS):
             known = yva[:, i] >= 0
             if known.sum() > 10 and yva[known, i].std() > 0:
-                aucs.append(f"{t}={roc_auc_score(yva[known, i], pv[known, i]):.3f}")
+                a = roc_auc_score(yva[known, i], pv[known, i])
+                auc_vals[t] = a
+                aucs.append(f"{t}={a:.3f}")
             else:
                 aucs.append(f"{t}=n/a")
-        print(f"ep {ep:2d}  train_loss={tot/n:.4f}  " + "  ".join(aucs))
+        print(f"ep {ep:2d}  train_loss={tot/n:.4f}  " + "  ".join(aucs), flush=True)
+        # checkpoint every epoch so a killed run is resumable (VM replacements happen)
+        ckpt = {"model": model.state_dict(), "opt": opt.state_dict(),
+                "mu": mu, "sd": sd, "features": FEATURE_NAMES,
+                "targets": TARGETS, "epoch": ep, "aucs": auc_vals}
+        torch.save(ckpt, out / "graph_value_last.pt")
+        if auc_vals.get("shot", 0) > best["shot"]:
+            best = {"shot": auc_vals["shot"], "epoch": ep}
+            torch.save(ckpt, out / "graph_value.pt")
 
-    out = ROOT / "models"
-    out.mkdir(exist_ok=True)
-    torch.save({"model": model.state_dict(), "mu": mu, "sd": sd,
-                "features": FEATURE_NAMES, "targets": TARGETS},
-               out / "graph_value.pt")
-    print(f"saved {out / 'graph_value.pt'}")
+    print(f"saved {out / 'graph_value.pt'} (best shot={best['shot']:.3f} @ ep {best['epoch']}) "
+          f"+ {out / 'graph_value_last.pt'} (last epoch)")
 
 
 if __name__ == "__main__":

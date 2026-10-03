@@ -50,4 +50,7 @@ done && cd ../..
   reaction time, pressers, forced-turnover rate; `scripts/plot_press.py`)
 - [x] Video pipeline V1 (detection + ByteTrack + team colors validated on
   real footage; `src/video/`, `scripts/video_to_trajectories.py`)
+- [x] Graph-attention value model V2 (`src/models/graph_value.py`, `models/graph_value.pt` —
+  per-frame player self-attention + 3 targets: shot 0.978 / box entry 0.962 /
+  line break 0.687 val AUC; see `reports/GRAPH_MODEL.md`)
 - [ ] Auto calibration (learned pitch-keypoint model) + wide-shot validation
