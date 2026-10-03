@@ -26,8 +26,16 @@ FPS = 25.0
 WIN = 75
 
 
-def possession_features(seg: pd.DataFrame, team: str, adir: int):
-    """Vectorized 11-feature matrix (T, 11) for one possession segment."""
+def possession_arrays(seg: pd.DataFrame, team: str, adir: int):
+    """Raw per-player coordinate arrays for one possession segment.
+
+    Returns (frames, A, D, B, Am, Dm, Bm, att_ids, def_ids):
+      frames  : (T,) sorted frame numbers
+      A/D     : (T, n_players, 2) normalized coords, attack-flipped if adir=-1
+      B       : (T, 2) normalized ball coords, attack-flipped if adir=-1
+      Am/Dm/Bm: same in meters (x*L, y*W)
+      att_ids/def_ids: player_id ordering matching A's / D's second axis
+    """
     opp = "away" if team == "home" else "home"
     frames = np.sort(seg["frame"].unique())
     T = len(frames)
@@ -57,6 +65,12 @@ def possession_features(seg: pd.DataFrame, team: str, adir: int):
     Am = A * [L, W]
     Dm = D * [L, W]
     Bm = B * [L, W]
+    return frames, A, D, B, Am, Dm, Bm, att_ids, def_ids
+
+
+def features_from_arrays(frames, A, D, B, Am, Dm, Bm):
+    """Vectorized 11-feature matrix (T, 11) from possession_arrays output."""
+    T = len(frames)
     F = np.full((T, 11), np.nan)
     F[:, 0] = B[:, 0]
     F[:, 1] = B[:, 1]
@@ -82,6 +96,12 @@ def possession_features(seg: pd.DataFrame, team: str, adir: int):
     F[:, 10] = np.nansum((ax > 1 - BOX_X) & (np.abs(A[:, :, 1] - 0.5) < BOX_Y / 2), axis=1)
     F[~np.isfinite(F[:, 0]), :] = np.nan  # no ball -> invalid
     return frames, F
+
+
+def possession_features(seg: pd.DataFrame, team: str, adir: int):
+    """Vectorized 11-feature matrix (T, 11) for one possession segment."""
+    frames, A, D, B, Am, Dm, Bm, _, _ = possession_arrays(seg, team, adir)
+    return features_from_arrays(frames, A, D, B, Am, Dm, Bm)
 
 
 def score_game(game, model, mu, sd, device):

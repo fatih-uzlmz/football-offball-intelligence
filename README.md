@@ -37,11 +37,13 @@ done && cd ../..
 - [x] Repo skeleton + env
 - [x] Metrica Sample Game 1 tracking data (145k frames, ~96 min) -> parquet
 - [x] 2D pitch frame visualization
-- [ ] Possession segmentation + ball-carrier estimation
-- [x] Heuristic run detector (Phase 3: 960 runs, geometry before/after)
-- [ ] Defender-displacement metric (Phase 4 MVP)
+- [x] Possession segmentation + ball-carrier estimation (748 possessions)
+- [x] Heuristic run detector (Phase 3: 3,001 runs, geometry before/after)
+- [x] Defender-displacement metric (Phase 4 MVP: per-run defender displacement)
 - [x] PyTorch value model (Phase 5: LSTM, val AUC 0.944)
 - [x] Run scoring: OffBallValue = V(after) - V(before) for ~1,400 runs
+- [x] Counterfactual run scoring (`scripts/score_counterfactual.py` — "what if he
+  hadn't made the run?": frozen + drift baselines, 2,259 runs, top run +0.514)
 - [x] Tactical search engine (Phase 6: `scripts/search_runs.py` — filter,
   rank, and render runs by tactical criteria)
 - [x] Pressing module (Phase 7: `scripts/detect_presses.py` — 883 presses,
