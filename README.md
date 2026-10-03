@@ -43,7 +43,10 @@ done && cd ../..
 - [x] PyTorch value model (Phase 5: LSTM, val AUC 0.944)
 - [x] Run scoring: OffBallValue = V(after) - V(before) for ~1,400 runs
 - [x] Counterfactual run scoring (`scripts/score_counterfactual.py` — "what if he
-  hadn't made the run?": frozen + drift baselines, 2,259 runs, top run +0.514)
+  hadn't made the run?": frozen + drift baselines, 2,259 runs, top run +0.514;
+  V2 re-run with the graph model in `scripts/score_counterfactual_v2.py`:
+  2,224 runs, mean cf_gain +0.015 vs +0.001, uncorrelated with V1 (r=0.003),
+  top run +0.784; see `reports/COUNTERFACTUAL.md`, `reports/COUNTERFACTUAL_V2.md`)
 - [x] Tactical search engine (Phase 6: `scripts/search_runs.py` — filter,
   rank, and render runs by tactical criteria)
 - [x] Pressing module (Phase 7: `scripts/detect_presses.py` — 883 presses,

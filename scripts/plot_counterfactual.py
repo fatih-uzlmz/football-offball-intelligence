@@ -56,9 +56,10 @@ def _panel(ax, seg, r, team, opp, tcolor, frozen=False, title=""):
     style(ax, title)
 
 
-def main(game: str, rank: int, sort: str, out: str):
+def main(game: str, rank: int, sort: str, out: str, v2: bool):
     runs = pd.read_parquet(
-        ROOT / "data" / "trajectories" / f"{game}_runs_counterfactual.parquet")
+        ROOT / "data" / "trajectories" /
+        f"{game}_runs_counterfactual{'_v2' if v2 else ''}.parquet")
     runs = runs.sort_values(sort, ascending=False).reset_index(drop=True)
     r = runs.iloc[rank]
     df = pd.read_parquet(ROOT / "data" / "trajectories" / f"{game}.parquet")
@@ -71,16 +72,30 @@ def main(game: str, rank: int, sort: str, out: str):
                                 int(r["start_frame"]), int(r["end_frame"]), "frozen")
 
     fig, (a1, a2) = plt.subplots(1, 2, figsize=(20, 8))
-    vg = (f"value {r['value_before']:.2f} -> {r['value_after']:.2f} "
-          f"(+{r['value_gained']:.2f})"
-          if pd.notna(r["value_gained"])
-          else f"end-of-possession value {r['value_after']:.2f} "
-               f"(no before-window: run starts < 3 s into possession)")
-    t1 = (f"ACTUAL: #{r['runner']} ran {r['path_m']:.1f}m, dragged def "
-          f"{r['defender_displacement_m']:.1f}m\n{vg}")
-    t2 = (f"COUNTERFACTUAL (frozen): #{r['runner']} stays put\n"
-          f"value {r['value_cf_frozen']:.2f}  |  "
-          f"run's worth: +{r['cf_gain_frozen']:.2f}")
+    if v2:
+        t1 = (f"ACTUAL: #{r['runner']} ran {r['path_m']:.1f}m, dragged def "
+              f"{r['defender_displacement_m']:.1f}m\n"
+              f"V2 shot value at run end: {r['value_v2_shot']:.2f}")
+        t2 = (f"COUNTERFACTUAL (frozen): #{r['runner']} stays put\n"
+              f"V2 shot value {r['value_cf_frozen_shot']:.2f}  |  "
+              f"run's worth: +{r['cf_gain_frozen']:.2f}")
+        cols = ["runner", "team", "duration_s", "path_m",
+                "defender_displacement_m", "value_v2_shot",
+                "value_cf_frozen_shot", "cf_gain_frozen"]
+    else:
+        vg = (f"value {r['value_before']:.2f} -> {r['value_after']:.2f} "
+              f"(+{r['value_gained']:.2f})"
+              if pd.notna(r["value_gained"])
+              else f"end-of-possession value {r['value_after']:.2f} "
+                   f"(no before-window: run starts < 3 s into possession)")
+        t1 = (f"ACTUAL: #{r['runner']} ran {r['path_m']:.1f}m, dragged def "
+              f"{r['defender_displacement_m']:.1f}m\n{vg}")
+        t2 = (f"COUNTERFACTUAL (frozen): #{r['runner']} stays put\n"
+              f"value {r['value_cf_frozen']:.2f}  |  "
+              f"run's worth: +{r['cf_gain_frozen']:.2f}")
+        cols = ["runner", "team", "duration_s", "path_m", "defender_displacement_m",
+                "value_before", "value_after", "value_gained",
+                "value_cf_frozen", "cf_gain_frozen", "shot_within_5s"]
     _panel(a1, seg, r, team, opp, tcolor, title=t1)
     _panel(a2, cf, r, team, opp, tcolor, frozen=True, title=t2)
     fig.suptitle(f"{game} — run #{rank} by {sort}: what if he hadn't made the run?",
@@ -90,9 +105,7 @@ def main(game: str, rank: int, sort: str, out: str):
     fig.savefig(outp, dpi=130, bbox_inches="tight")
     plt.close(fig)
     print(f"saved {outp}")
-    print(r[["runner", "team", "duration_s", "path_m", "defender_displacement_m",
-             "value_before", "value_after", "value_gained",
-             "value_cf_frozen", "cf_gain_frozen", "shot_within_5s"]].to_string())
+    print(r[cols].to_string())
 
 
 if __name__ == "__main__":
@@ -102,5 +115,7 @@ if __name__ == "__main__":
                     help="rank by --sort metric (0 = top)")
     ap.add_argument("--sort", default="cf_gain_frozen")
     ap.add_argument("--out", default="reports/counterfactual/cf_sample.png")
+    ap.add_argument("--v2", action="store_true",
+                    help="use the V2 (graph-model) counterfactual parquet")
     a = ap.parse_args()
-    main(a.game, a.rank, a.sort, a.out)
+    main(a.game, a.rank, a.sort, a.out, a.v2)
