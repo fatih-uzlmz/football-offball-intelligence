@@ -101,9 +101,18 @@ and at run end (`V_after`); `value_gained = V_after − V_before`. Features
 computed vectorized per possession (NumPy broadcasting, not per-frame
 Python loops).
 
-- **1,400 runs scored** (the rest sit too close to a possession edge for full
-  75-frame windows — fixable with padding later).
-- Mean value gained per game: **+0.18 / +0.11 / +0.08**.
+- **2,378 of 3,001 runs scored (79.2%)**. The window-padding fix
+  (2026-10-03) extends each possession's segment 74 frames backward so runs
+  starting near a possession edge get full 75-frame windows; previously only
+  1,400 (46.7%) were scored. The remaining 623 can't be scored honestly:
+  621 have missing ball tracking inside the window, 2 sit in the game's
+  first 74 frames.
+- Runs whose before-window reaches into the previous possession carry
+  `before_crosses_boundary=True` (1,350 runs, 978 of them scored): their
+  `value_gained` mixes the turnover with the run, so it overstates the run's
+  own contribution — the V2 counterfactual gain is the cleaner number
+  for those.
+- Mean value gained per game: **+0.18 / +0.09 / +0.07**.
 - **Best run in the dataset:** Game 2, away #24 — 10.6 s, 64.7 m at
   7.6 m/s, dragged defender #3 **35.7 m**, value **0.00 → 0.93 (+0.93)**.
   The run single-handedly took the attack from nothing to a 93% shot

@@ -16,6 +16,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from fps import load_fps
+
 ROOT = Path(__file__).resolve().parents[1]
 L, W = 105.0, 68.0
 FPS = 25.0
@@ -23,8 +25,10 @@ FPS = 25.0
 SPEED_MIN = 4.0    # m/s sustained
 DUR_MIN = 1.0      # s
 DIST_MIN = 5.0     # m path length
-GAP_TOL = 12       # frames below threshold tolerated inside a run
-SMOOTH = 13        # velocity smoothing window (~0.5s)
+GAP_TOL = 12       # frames below threshold tolerated inside a run (@25fps)
+SMOOTH = 13        # velocity smoothing window, frames (~0.5s @25fps)
+SMOOTH_S = 0.52    # ... = 13/25 s; int(round(SMOOTH_S * fps)) == 13 @25fps
+GAP_TOL_S = 0.48   # ... = 12/25 s; int(round(GAP_TOL_S * fps)) == 12 @25fps
 AFTER_S = 5.0      # outcome window
 
 
@@ -39,7 +43,7 @@ def attack_dirs(df: pd.DataFrame, poss: pd.DataFrame) -> dict:
     return dirs
 
 
-def add_velocity(df: pd.DataFrame) -> pd.DataFrame:
+def add_velocity(df: pd.DataFrame, smooth: int = SMOOTH) -> pd.DataFrame:
     d = df[df["team"].isin(("home", "away"))].copy()
     d["xm"], d["ym"] = d["x"] * L, d["y"] * W
     d = d.sort_values(["team", "player_id", "frame"])
@@ -48,13 +52,14 @@ def add_velocity(df: pd.DataFrame) -> pd.DataFrame:
     d["vy"] = g["ym"].diff() / g["time"].diff()
     d["speed"] = np.hypot(d["vx"], d["vy"])
     d["speed_sm"] = g["speed"].transform(
-        lambda s: s.rolling(SMOOTH, center=True, min_periods=1).mean())
+        lambda s: s.rolling(smooth, center=True, min_periods=1).mean())
     return d
 
 
 def runs_in_possession(seg: pd.DataFrame, carriers: pd.DataFrame,
                        possession_id: int, team: str, period: int,
-                       adirs: dict) -> list:
+                       adirs: dict, fps: float = FPS,
+                       gap_tol: int = GAP_TOL) -> list:
     out = []
     cframes = set(carriers.loc[
         (carriers["frame"] >= seg["frame"].min()) &
@@ -75,7 +80,7 @@ def runs_in_possession(seg: pd.DataFrame, carriers: pd.DataFrame,
                 cur.append(i); gap = 0
             elif cur:
                 gap += 1
-                if gap > GAP_TOL:
+                if gap > gap_tol:
                     runs.append(cur); cur = []; gap = 0
                 else:
                     cur.append(i)
@@ -83,7 +88,7 @@ def runs_in_possession(seg: pd.DataFrame, carriers: pd.DataFrame,
             runs.append(cur)
         for idx in runs:
             r = g.iloc[idx]
-            dur = (r["frame"].iloc[-1] - r["frame"].iloc[0] + 1) / FPS
+            dur = (r["frame"].iloc[-1] - r["frame"].iloc[0] + 1) / fps
             if dur < DUR_MIN:
                 continue
             path = np.hypot(r["xm"].diff(), r["ym"].diff()).sum()
@@ -139,8 +144,13 @@ def runs_in_possession(seg: pd.DataFrame, carriers: pd.DataFrame,
     return out
 
 
-def add_outcomes(runs: pd.DataFrame, game: str) -> pd.DataFrame:
-    ev = pd.read_csv(ROOT / "data" / "raw" / f"{game}_RawEventsData.csv")
+def add_outcomes(runs: pd.DataFrame, game: str, events_csv=None) -> pd.DataFrame:
+    ev_path = Path(events_csv) if events_csv else ROOT / "data" / "raw" / f"{game}_RawEventsData.csv"
+    if not ev_path.exists():
+        print(f"warning: no event file {ev_path}; shot_within_5s=False for all runs")
+        runs["shot_within_5s"] = False
+        return runs
+    ev = pd.read_csv(ev_path)
     shots = ev[ev["Type"] == "SHOT"].copy()
     shots["team_norm"] = shots["Team"].str.lower()
     runs["shot_within_5s"] = False
@@ -152,11 +162,14 @@ def add_outcomes(runs: pd.DataFrame, game: str) -> pd.DataFrame:
     return runs
 
 
-def main(game: str):
+def main(game: str, out_path=None, events_csv=None):
+    fps = load_fps(game)
+    smooth = int(round(SMOOTH_S * fps))    # ~0.5s velocity smoothing
+    gap_tol = int(round(GAP_TOL_S * fps))  # ~0.48s gap tolerance inside a run
     df = pd.read_parquet(ROOT / "data" / "trajectories" / f"{game}.parquet")
     poss = pd.read_parquet(ROOT / "data" / "trajectories" / f"{game}_possessions.parquet")
     carriers = pd.read_parquet(ROOT / "data" / "trajectories" / f"{game}_carriers.parquet")
-    vel = add_velocity(df)
+    vel = add_velocity(df, smooth=smooth)
     pmap = df[["frame", "period"]].drop_duplicates().set_index("frame")["period"]
     adirs = attack_dirs(df, poss)
 
@@ -165,13 +178,14 @@ def main(game: str):
         seg = vel[(vel["frame"] >= p["start_frame"]) & (vel["frame"] <= p["end_frame"])]
         period = int(pmap.get(p["start_frame"], 1))
         all_runs += runs_in_possession(seg, carriers, int(p["possession_id"]),
-                                       p["team"], period, adirs)
+                                       p["team"], period, adirs,
+                                       fps=fps, gap_tol=gap_tol)
     runs = pd.DataFrame(all_runs)
     if not runs.empty:
-        runs = add_outcomes(runs, game)
-    out = ROOT / "data" / "trajectories" / f"{game}_runs.parquet"
+        runs = add_outcomes(runs, game, events_csv=events_csv)
+    out = Path(out_path) if out_path else ROOT / "data" / "trajectories" / f"{game}_runs.parquet"
     runs.to_parquet(out, index=False)
-    print(f"runs detected: {len(runs)} -> {out}")
+    print(f"{game}: fps={fps:g} runs detected: {len(runs)} -> {out}")
     if not runs.empty:
         print(runs[["duration_s", "path_m", "peak_speed", "defender_displacement_m",
                     "space_before_m", "space_after_m"]].describe().round(1))

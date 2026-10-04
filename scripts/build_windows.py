@@ -1,6 +1,8 @@
 """Build labeled training windows for the value model.
 
-For each possession, slide a 3s window (75 frames @25fps, stride 1s).
+For each possession, slide a 3s window (75 frames @25fps / 30 frames @10fps,
+stride 1s). Frame counts derive from the dataset's fps (see scripts/fps.py);
+on 25 fps data the windows are bit-identical to the old hardcoded behavior.
 Features per frame (attack-normalized: x_att=1 is the opponent goal):
   ball_x_att, ball_y, ball_speed, ball_dist_goal, ball_vx_att,
   n_attackers_ahead_of_ball, att_centroid_x, def_centroid_x,
@@ -8,13 +10,15 @@ Features per frame (attack-normalized: x_att=1 is the opponent goal):
   pressure (min defender dist to ball), n_attackers_in_box
 Label: 1 if the possession team takes a SHOT within 5s after window end.
 
-Output: data/trajectories/<game>_windows.npz (X [N,75,11], y [N], meta)
+Output: data/trajectories/<game>_windows.npz (X [N,win,11], y [N], meta)
 """
 import argparse
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+from fps import load_fps, win_frames, stride_frames
 
 ROOT = Path(__file__).resolve().parents[1]
 L, W = 105.0, 68.0
@@ -64,10 +68,12 @@ def frame_features(fr, team, opp, adir):
     ]
 
 
-def build(game):
+def build(game, out_path=None, events_csv=None):
+    fps = load_fps(game)
+    win, stride = win_frames(fps), stride_frames(fps)
     df = pd.read_parquet(ROOT / "data" / "trajectories" / f"{game}.parquet")
     poss = pd.read_parquet(ROOT / "data" / "trajectories" / f"{game}_possessions.parquet")
-    ev = pd.read_csv(ROOT / "data" / "raw" / f"{game}_RawEventsData.csv")
+    ev = pd.read_csv(events_csv or ROOT / "data" / "raw" / f"{game}_RawEventsData.csv")
     shots = ev[ev["Type"] == "SHOT"].copy()
     shots["team_norm"] = shots["Team"].str.lower()
     adirs = attack_dirs(df, poss)
@@ -82,8 +88,8 @@ def build(game):
         fmap = {f: seg[seg["frame"] == f] for f in frames}
         # per-frame ball vx (attack dir)
         bxs = {f: fmap[f][fmap[f]["team"] == "ball"]["x"] for f in frames}
-        for s in range(0, len(frames) - WIN + 1, STRIDE):
-            wf = frames[s:s + WIN]
+        for s in range(0, len(frames) - win + 1, stride):
+            wf = frames[s:s + win]
             feats = []
             ok = True
             for j, f in enumerate(wf):
@@ -96,7 +102,7 @@ def build(game):
                     f0 = wf[j - 1]
                     x0 = bxs[f0].iloc[0] if len(bxs[f0]) else np.nan
                     x1 = bxs[f].iloc[0] if len(bxs[f]) else np.nan
-                    dt = 1 / FPS
+                    dt = 1 / fps
                     vx = ((x1 if adir == 1 else 1 - x1) - (x0 if adir == 1 else 1 - x0)) * L / dt \
                         if not (np.isnan(x0) or np.isnan(x1)) else 0.0
                     row[4] = vx
@@ -117,9 +123,9 @@ def build(game):
             meta.append((int(p["possession_id"]), team, end_time))
     X = np.array(X, dtype=np.float32)
     y = np.array(y, dtype=np.float32)
-    out = ROOT / "data" / "trajectories" / f"{game}_windows.npz"
+    out = Path(out_path) if out_path else ROOT / "data" / "trajectories" / f"{game}_windows.npz"
     np.savez_compressed(out, X=X, y=y, meta=np.array(meta, dtype=object))
-    print(f"{game}: windows={len(y)}  shot_rate={y.mean():.3f} -> {out}")
+    print(f"{game}: fps={fps:g} win={win} windows={len(y)}  shot_rate={y.mean():.3f} -> {out}")
 
 
 if __name__ == "__main__":

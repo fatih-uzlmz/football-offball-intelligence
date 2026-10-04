@@ -1,8 +1,9 @@
 """Score every detected run: OffBallValue = V(after) - V(before).
 
-For each run, build the same 75-frame feature windows the value model
-was trained on: one ending at the run's start (before), one ending at
-its end (after). Features are computed vectorized per possession.
+For each run, build the same 3s feature windows the value model
+was trained on (75 frames @25fps / 30 @10fps — see scripts/fps.py):
+one ending at the run's start (before), one ending at its end (after).
+Features are computed vectorized per possession.
 
 Output: data/trajectories/<game>_runs_scored.parquet with
         value_before, value_after, value_gained columns.
@@ -19,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from models.value_lstm import ValueLSTM
 from build_windows import attack_dirs, BOX_X, BOX_Y
+from fps import load_fps, win_frames
 
 ROOT = Path(__file__).resolve().parents[1]
 L, W = 105.0, 68.0
@@ -68,13 +70,13 @@ def possession_arrays(seg: pd.DataFrame, team: str, adir: int):
     return frames, A, D, B, Am, Dm, Bm, att_ids, def_ids
 
 
-def features_from_arrays(frames, A, D, B, Am, Dm, Bm):
+def features_from_arrays(frames, A, D, B, Am, Dm, Bm, fps=FPS):
     """Vectorized 11-feature matrix (T, 11) from possession_arrays output."""
     T = len(frames)
     F = np.full((T, 11), np.nan)
     F[:, 0] = B[:, 0]
     F[:, 1] = B[:, 1]
-    dt = 1 / FPS
+    dt = 1 / fps
     dB = np.diff(Bm, axis=0) / dt
     F[1:, 2] = np.linalg.norm(np.where(np.isnan(dB), 0, dB), axis=1)
     F[:, 2] = np.where(np.isnan(F[:, 2]), 0, F[:, 2])
@@ -98,50 +100,70 @@ def features_from_arrays(frames, A, D, B, Am, Dm, Bm):
     return frames, F
 
 
-def possession_features(seg: pd.DataFrame, team: str, adir: int):
+def possession_features(seg: pd.DataFrame, team: str, adir: int, fps=FPS):
     """Vectorized 11-feature matrix (T, 11) for one possession segment."""
     frames, A, D, B, Am, Dm, Bm, _, _ = possession_arrays(seg, team, adir)
-    return features_from_arrays(frames, A, D, B, Am, Dm, Bm)
+    return features_from_arrays(frames, A, D, B, Am, Dm, Bm, fps=fps)
 
 
-def score_game(game, model, mu, sd, device):
+def score_game(game, model, mu, sd, device, out_path=None):
+    fps = load_fps(game)
+    win = win_frames(fps)
     df = pd.read_parquet(ROOT / "data" / "trajectories" / f"{game}.parquet")
     poss = pd.read_parquet(ROOT / "data" / "trajectories" / f"{game}_possessions.parquet")
     runs = pd.read_parquet(ROOT / "data" / "trajectories" / f"{game}_runs.parquet")
     pmap = df[["frame", "period"]].drop_duplicates().set_index("frame")["period"]
     adirs = attack_dirs(df, poss)
-    vb, va = [], []
+    game_frames = np.sort(df["frame"].unique())
+    vb, va, crosses = [], [], []
     with torch.no_grad():
         for pid, g in runs.groupby("possession_id"):
             p = poss.loc[poss["possession_id"] == pid].iloc[0]
             team = p["team"]
             period = int(pmap.get(p["start_frame"], 1))
             adir = adirs.get((period, team), 1)
-            seg = df[(df["frame"] >= p["start_frame"]) & (df["frame"] <= p["end_frame"])]
-            frames, F = possession_features(seg, team, adir)
+            # Extend the segment backward by a full window so runs starting
+            # near a possession boundary still get `win` observed frames. (This
+            # fixes the "window padding" NaNs: previously the window was cut
+            # at the possession edge.) Caveat: extended windows can include
+            # the possession change itself, which training windows never
+            # contained — noted in the reports.
+            start_pos = int(np.searchsorted(game_frames, p["start_frame"]))
+            lo = game_frames[max(0, start_pos - (win - 1))]
+            seg = df[(df["frame"] >= lo) & (df["frame"] <= p["end_frame"])]
+            frames, F = possession_features(seg, team, adir, fps=fps)
             fpos = {f: i for i, f in enumerate(frames)}
             for _, r in g.iterrows():
                 vals = []
-                for f in (r["start_frame"], r["end_frame"]):
+                # Flag runs whose before-window reaches into the previous
+                # possession: value_before then mixes the turnover with the
+                # run, so value_gained overstates the run's own contribution
+                # (the V2 counterfactual gain is the cleaner number there).
+                cross = False
+                for k, f in enumerate((r["start_frame"], r["end_frame"])):
                     i = fpos.get(f)
-                    if i is None or i < WIN - 1:
+                    if i is None or i < win - 1:
                         vals.append(np.nan)
                         continue
-                    win = F[i - WIN + 1:i + 1]
-                    if np.isnan(win).any():
+                    if k == 0 and frames[i - win + 1] < p["start_frame"]:
+                        cross = True
+                    win_ = F[i - win + 1:i + 1]
+                    if np.isnan(win_).any():
                         vals.append(np.nan)
                         continue
-                    x = torch.tensor((win - mu) / sd, dtype=torch.float32).unsqueeze(0).to(device)
+                    x = torch.tensor((win_ - mu) / sd, dtype=torch.float32).unsqueeze(0).to(device)
                     vals.append(float(torch.sigmoid(model(x)).item()))
                 vb.append(vals[0])
                 va.append(vals[1])
+                crosses.append(cross)
     runs["value_before"] = vb
     runs["value_after"] = va
     runs["value_gained"] = runs["value_after"] - runs["value_before"]
-    out = ROOT / "data" / "trajectories" / f"{game}_runs_scored.parquet"
+    runs["before_crosses_boundary"] = crosses
+    out = Path(out_path) if out_path else ROOT / "data" / "trajectories" / f"{game}_runs_scored.parquet"
     runs.to_parquet(out, index=False)
     scored = runs.dropna(subset=["value_gained"])
-    print(f"{game}: scored {len(scored)}/{len(runs)}  "
+    print(f"{game}: fps={fps:g} win={win} scored {len(scored)}/{len(runs)}  "
           f"mean_gain={scored['value_gained'].mean():.4f}")
     return scored
 
@@ -157,11 +179,16 @@ def main(games):
     for g in games:
         all_runs.append(score_game(g, model, mu, sd, device))
     runs = pd.concat(all_runs, ignore_index=True)
+    cols = ["runner", "team", "duration_s", "path_m", "defender_displacement_m",
+            "value_before", "value_after", "value_gained",
+            "before_crosses_boundary", "shot_within_5s"]
+    print("\ntop 5 runs by value gained (all):")
     top = runs.nlargest(5, "value_gained")
-    print("\ntop 5 runs by value gained:")
-    print(top[["runner", "team", "duration_s", "path_m",
-               "defender_displacement_m", "value_before", "value_after",
-               "value_gained", "shot_within_5s"]].round(3).to_string(index=False))
+    print(top[cols].round(3).to_string(index=False))
+    clean = runs[~runs["before_crosses_boundary"]]
+    print("\ntop 5 runs by value gained (before-window inside possession):")
+    topc = clean.nlargest(5, "value_gained")
+    print(topc[cols].round(3).to_string(index=False))
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 """Build per-player graph windows for the attention value model.
 
-For each possession, slide a 3s window (75 frames @25fps, stride 1s).
+For each possession, slide a 3s window (75 frames @25fps / 30 @10fps,
+stride 1s); frame counts derive from the dataset's fps (scripts/fps.py).
 Each frame is a set of 23 tokens (11 attackers + 11 defenders + ball, fixed
 order), each token carrying 8 attack-normalized features:
   x_att, y, vx_att (m/s), vy (m/s), speed (m/s),
@@ -17,7 +18,7 @@ windows with < 1s of horizon get label -1 for those targets (masked in loss).
 With 23 nodes, full self-attention over players == GAT on a complete graph.
 
 Output: data/trajectories/<game>_graph_windows.npz
-        (X [N,75,23,8], y [N,3], meta)
+        (X [N,win,23,8], y [N,3], meta)
 """
 import argparse
 import sys
@@ -28,6 +29,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from build_windows import attack_dirs, BOX_X, BOX_Y
+from fps import load_fps, win_frames, stride_frames
 
 ROOT = Path(__file__).resolve().parents[1]
 L, W = 105.0, 68.0
@@ -167,13 +169,18 @@ def game_horizon_arrays(df: pd.DataFrame):
 
 
 def horizon_labels(frames, bx, by, period, sx, end_frame: int, end_period: int,
-                   team: str, opp: str, adir: int):
-    """box_entry / line_break from the 5s trajectory horizon (vectorized)."""
+                   team: str, opp: str, adir: int,
+                   horizon_frames: int = 125, min_horizon: int = 25):
+    """box_entry / line_break from the 5s trajectory horizon (vectorized).
+
+    horizon_frames/min_horizon default to the 25fps values (5s/1s); callers
+    on other frame rates pass int(round(5.0*fps)) / int(round(1.0*fps)).
+    """
     lo = np.searchsorted(frames, end_frame + 1)
-    hi = np.searchsorted(frames, end_frame + HORIZON_FRAMES + 1)
+    hi = np.searchsorted(frames, end_frame + horizon_frames + 1)
     sl = slice(lo, hi)
     same = period[sl] == end_period
-    if same.sum() < MIN_HORIZON:
+    if same.sum() < min_horizon:
         return -1.0, -1.0
     slb = slice(lo, hi)
     bxa = bx[slb] if adir == 1 else 1 - bx[slb]
@@ -191,13 +198,23 @@ def horizon_labels(frames, bx, by, period, sx, end_frame: int, end_period: int,
     return box, line
 
 
-def build(game: str):
+def build(game: str, out_path=None, events_csv=None, shots_known: bool = True):
+    """shots_known=False masks the shot target (-1 for every window); use for
+    datasets with no shot events (e.g. SkillCorner). box_entry/line_break
+    come from trajectories and are unaffected. (Additive 2026-10-04.)"""
+    fps = load_fps(game)
+    win, stride = win_frames(fps), stride_frames(fps)
+    horizon_frames = int(round(AFTER_S * fps))
+    min_horizon = int(round(1.0 * fps))  # <1s of horizon -> label -1 (masked)
     df = add_velocities(pd.read_parquet(
         ROOT / "data" / "trajectories" / f"{game}.parquet"))
     poss = pd.read_parquet(ROOT / "data" / "trajectories" / f"{game}_possessions.parquet")
-    ev = pd.read_csv(ROOT / "data" / "raw" / f"{game}_RawEventsData.csv")
-    shots = ev[ev["Type"] == "SHOT"].copy()
-    shots["team_norm"] = shots["Team"].str.lower()
+    if shots_known:
+        ev = pd.read_csv(events_csv or ROOT / "data" / "raw" / f"{game}_RawEventsData.csv")
+        shots = ev[ev["Type"] == "SHOT"].copy()
+        shots["team_norm"] = shots["Team"].str.lower()
+    else:
+        shots = None
     adirs = attack_dirs(df, poss)
     pmap = df[["frame", "period"]].drop_duplicates().set_index("frame")["period"]
     frames_g, bx_g, by_g, period_g, sx_g = game_horizon_arrays(df)
@@ -213,29 +230,33 @@ def build(game: str):
             continue
         T = len(frames)
         tmap = dict(zip(frames, seg.sort_values("frame").drop_duplicates("frame")["time"].to_numpy()))
-        for s in range(0, T - WIN + 1, STRIDE):
-            if not good[s:s + WIN].all():
+        for s in range(0, T - win + 1, stride):
+            if not good[s:s + win].all():
                 continue
-            wf = frames[s:s + WIN]
+            wf = frames[s:s + win]
             end_time = float(tmap[wf[-1]])
-            shot = float(((shots["team_norm"] == team) &
-                          (shots["Start Time [s]"] > end_time) &
-                          (shots["Start Time [s]"] <= end_time + AFTER_S)).any())
+            if shots_known:
+                shot = float(((shots["team_norm"] == team) &
+                              (shots["Start Time [s]"] > end_time) &
+                              (shots["Start Time [s]"] <= end_time + AFTER_S)).any())
+            else:
+                shot = -1.0  # unknown: masked in the loss, never 0
             box, brk = horizon_labels(frames_g, bx_g, by_g, period_g, sx_g,
-                                      int(wf[-1]), period, team, opp, adir)
-            X.append(toks[s:s + WIN])
+                                      int(wf[-1]), period, team, opp, adir,
+                                      horizon_frames, min_horizon)
+            X.append(toks[s:s + win])
             y.append([shot, box, brk])
             meta.append((int(p["possession_id"]), team, end_time))
     X = np.array(X, dtype=np.float32)
     y = np.array(y, dtype=np.float32)
-    out = ROOT / "data" / "trajectories" / f"{game}_graph_windows.npz"
+    out = Path(out_path) if out_path else ROOT / "data" / "trajectories" / f"{game}_graph_windows.npz"
     np.savez_compressed(out, X=X, y=y, meta=np.array(meta, dtype=object))
     rates = []
     for i in range(3):
         known = y[:, i] >= 0
         rates.append(f"{TARGETS[i]}: known={known.mean():.1%} rate={y[known, i].mean():.3f}"
                      if known.any() else f"{TARGETS[i]}: none")
-    print(f"{game}: windows={len(y)}  X{X.shape}  " + "  ".join(rates) + f" -> {out}")
+    print(f"{game}: fps={fps:g} win={win} windows={len(y)}  X{X.shape}  " + "  ".join(rates) + f" -> {out}")
 
 
 if __name__ == "__main__":

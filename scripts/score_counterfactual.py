@@ -3,7 +3,8 @@
 For each value-scored run, rebuild the possession's trajectory segment with
 the runner replaced by a counterfactual baseline, recompute the 11
 value-model features with the *same* pipeline as score_runs.py, and evaluate
-the trained LSTM on the 75-frame window ending at the run's end:
+the trained LSTM on the 3s window ending at the run's end (75 frames @25fps
+/ 30 @10fps — see scripts/fps.py):
 
     cf_gain = V(actual end) - V(counterfactual end)
 
@@ -44,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from models.value_lstm import ValueLSTM
 from build_windows import attack_dirs
 from score_runs import features_from_arrays, possession_arrays
+from fps import load_fps, win_frames
 
 ROOT = Path(__file__).resolve().parents[1]
 L, W = 105.0, 68.0
@@ -55,7 +57,7 @@ VARIANTS = ("frozen", "drift")
 
 def counterfactual_segment(seg: pd.DataFrame, runner: int, team: str,
                            start_frame: int, end_frame: int,
-                           variant: str) -> pd.DataFrame:
+                           variant: str, fps: float = FPS) -> pd.DataFrame:
     """Copy of `seg` with the runner's post-start trajectory replaced.
 
     Frames <= start_frame are never touched.
@@ -84,7 +86,7 @@ def counterfactual_segment(seg: pd.DataFrame, runner: int, team: str,
         out.loc[mask, "x"] = x0
         out.loc[mask, "y"] = y0
     else:
-        pre = r[(r["frame"] >= start_frame - int(PRE_S * FPS)) &
+        pre = r[(r["frame"] >= start_frame - int(round(PRE_S * fps))) &
                 (r["frame"] <= start_frame)]
         vx = vy = 0.0
         if len(pre) >= 2:
@@ -98,20 +100,21 @@ def counterfactual_segment(seg: pd.DataFrame, runner: int, team: str,
     return out
 
 
-def window_value(model, F: np.ndarray, i: int, mu, sd, device) -> float:
-    if i < WIN - 1:
+def window_value(model, F: np.ndarray, i: int, mu, sd, device, win: int = WIN) -> float:
+    if i < win - 1:
         return np.nan
-    win = F[i - WIN + 1:i + 1]
-    if np.isnan(win).any():
+    w = F[i - win + 1:i + 1]
+    if np.isnan(w).any():
         return np.nan
-    x = torch.tensor((win - mu) / sd, dtype=torch.float32).unsqueeze(0).to(device)
+    x = torch.tensor((w - mu) / sd, dtype=torch.float32).unsqueeze(0).to(device)
     return float(torch.sigmoid(model(x)).item())
 
 
 def counterfactual_value(model, frames, A, D, B, Am, Dm, Bm, att_ids,
                           runner, team, seg, start_frame, end_frame,
-                          variant, adir, mu, sd, device) -> float:
-    """Value of the 75-frame window ending at end_frame under a counterfactual.
+                          variant, adir, mu, sd, device,
+                          fps: float = FPS, win: int = WIN) -> float:
+    """Value of the 3s window ending at end_frame under a counterfactual.
 
     The possession arrays are built once per possession; only the runner's
     column is patched with the counterfactual positions (attack-normalized
@@ -121,7 +124,8 @@ def counterfactual_value(model, frames, A, D, B, Am, Dm, Bm, att_ids,
     ridx = aidx.get(str(runner), aidx.get(runner))
     if ridx is None:
         return np.nan
-    cf = counterfactual_segment(seg, runner, team, start_frame, end_frame, variant)
+    cf = counterfactual_segment(seg, runner, team, start_frame, end_frame,
+                                variant, fps=fps)
     pid = cf["player_id"].astype(str) == str(runner)
     rows = cf[(cf["team"] == team) & pid &
               (cf["frame"] > start_frame) & (cf["frame"] <= end_frame)]
@@ -139,11 +143,13 @@ def counterfactual_value(model, frames, A, D, B, Am, Dm, Bm, att_ids,
         A2[i, ridx, 1] = y
         Am2[i, ridx, 0] = xn * L
         Am2[i, ridx, 1] = y * W
-    _, F = features_from_arrays(frames, A2, D, B, Am2, Dm, Bm)
-    return window_value(model, F, fpos.get(end_frame, -1), mu, sd, device)
+    _, F = features_from_arrays(frames, A2, D, B, Am2, Dm, Bm, fps=fps)
+    return window_value(model, F, fpos.get(end_frame, -1), mu, sd, device, win=win)
 
 
-def score_game(game, model, mu, sd, device, limit=None):
+def score_game(game, model, mu, sd, device, limit=None, out_path=None):
+    fps = load_fps(game)
+    win = win_frames(fps)
     df = pd.read_parquet(ROOT / "data" / "trajectories" / f"{game}.parquet")
     poss = pd.read_parquet(ROOT / "data" / "trajectories" / f"{game}_possessions.parquet")
     runs = pd.read_parquet(ROOT / "data" / "trajectories" / f"{game}_runs_scored.parquet")
@@ -167,16 +173,16 @@ def score_game(game, model, mu, sd, device, limit=None):
                         model, frames, A, D, B, Am, Dm, Bm, att_ids,
                         r["runner"], team, seg,
                         int(r["start_frame"]), int(r["end_frame"]),
-                        v, adir, mu, sd, device))
+                        v, adir, mu, sd, device, fps=fps, win=win))
     for v in VARIANTS:
         runs[f"value_cf_{v}"] = cf[v]
         runs[f"cf_gain_{v}"] = runs["value_after"] - runs[f"value_cf_{v}"]
-    out = ROOT / "data" / "trajectories" / f"{game}_runs_counterfactual.parquet"
+    out = Path(out_path) if out_path else ROOT / "data" / "trajectories" / f"{game}_runs_counterfactual.parquet"
     runs.to_parquet(out, index=False)
     s = runs.dropna(subset=["cf_gain_frozen"])
-    print(f"{game}: counterfactual-scored {len(s)}/{len(runs)}  "
-          f"mean_cf_gain_frozen={s['cf_gain_frozen'].mean():.4f}  "
-          f"mean_cf_gain_drift={s['cf_gain_drift'].mean():.4f}")
+    print(f"{game}: fps={fps:g} counterfactual-scored {len(s)}/{len(runs)}  "
+          f"mean_cf_gain_frozen={s['cf_gain_frozen'].mean():+.4f}  "
+          f"mean_cf_gain_drift={s['cf_gain_drift'].mean():+.4f}")
     return s
 
 

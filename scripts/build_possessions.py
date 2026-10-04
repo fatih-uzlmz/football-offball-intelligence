@@ -22,6 +22,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from fps import load_fps
+
 ROOT = Path(__file__).resolve().parents[1]
 
 PITCH_L, PITCH_W = 105.0, 68.0  # meters
@@ -31,7 +33,7 @@ MIN_DUR_S = 3.0
 MERGE_GAP_S = 1.0
 
 
-def estimate_carriers(df: pd.DataFrame) -> pd.DataFrame:
+def estimate_carriers(df: pd.DataFrame, smooth_win: int = SMOOTH_WIN) -> pd.DataFrame:
     players = df[df["team"].isin(("home", "away"))].copy()
     ball = df[df["team"] == "ball"][["frame", "x", "y"]].rename(
         columns={"x": "bx", "y": "by"})
@@ -49,7 +51,7 @@ def estimate_carriers(df: pd.DataFrame) -> pd.DataFrame:
     carriers = carriers.drop(columns="dist").sort_values("frame").reset_index(drop=True)
     # smooth team with majority vote (encode as numeric; rolling doesn't do strings)
     enc = carriers["carrier_team"].map({"home": 1.0, "away": -1.0})
-    sm = enc.rolling(SMOOTH_WIN, center=True, min_periods=1).mean()
+    sm = enc.rolling(smooth_win, center=True, min_periods=1).mean()
     carriers["carrier_team"] = sm.map(lambda v: "home" if v > 0 else ("away" if v < 0 else np.nan))
     return carriers
 
@@ -78,17 +80,20 @@ def segment_possessions(carriers: pd.DataFrame, fps: float = 25.0) -> pd.DataFra
     return poss
 
 
-def main(game: str):
+def main(game: str, out_dir=None):
+    fps = load_fps(game)
+    smooth_win = int(round(1.0 * fps))  # 1s majority-vote smoothing
     df = pd.read_parquet(ROOT / "data" / "trajectories" / f"{game}.parquet")
-    carriers = estimate_carriers(df)
-    possessions = segment_possessions(carriers)
+    carriers = estimate_carriers(df, smooth_win=smooth_win)
+    possessions = segment_possessions(carriers, fps=fps)
     # attach wall-clock times
     tmap = df[["frame", "time"]].drop_duplicates().set_index("frame")["time"]
     for col in ("start_frame", "end_frame"):
         possessions[col.replace("frame", "time")] = possessions[col].map(tmap)
-    carriers.to_parquet(ROOT / "data" / "trajectories" / f"{game}_carriers.parquet", index=False)
-    possessions.to_parquet(ROOT / "data" / "trajectories" / f"{game}_possessions.parquet", index=False)
-    print(f"possessions: {len(possessions)}")
+    out = Path(out_dir) if out_dir else ROOT / "data" / "trajectories"
+    carriers.to_parquet(out / f"{game}_carriers.parquet", index=False)
+    possessions.to_parquet(out / f"{game}_possessions.parquet", index=False)
+    print(f"{game}: fps={fps:g} possessions: {len(possessions)} -> {out}")
     print(possessions.groupby("team")["duration_s"].agg(["count", "mean", "max"]).round(1))
     print("\nlongest 5:")
     print(possessions.nlargest(5, "duration_s")[

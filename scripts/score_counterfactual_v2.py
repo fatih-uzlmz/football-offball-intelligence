@@ -6,8 +6,9 @@ but the value function is the V2 graph model: per-frame self-attention over
 
     cf_gain = V2_shot(actual end) - V2_shot(counterfactual end)
 
-where V2_shot is the graph model's shot probability on the 75-frame
-per-player window ending at the run's end frame.
+where V2_shot is the graph model's shot probability on the 3s
+per-player window ending at the run's end frame (75 frames @25fps,
+30 @10fps — see scripts/fps.py).
 
 Pipeline per run:
   1. patch the runner's (start_frame, end_frame] trajectory with the
@@ -15,7 +16,7 @@ Pipeline per run:
   2. recompute velocities on the patched segment (add_velocities) — the
      frozen runner's vx/vy must be ~0, not his sprint velocities
   3. rebuild the [T, 23, 8] token tensor (possession_tokens)
-  4. score the 75-frame window ending at end_frame with models/graph_value.pt
+  4. score the 3s window ending at end_frame with models/graph_value.pt
 
 This fixes V1's core weakness: pooled features barely moved when one
 player's trajectory changed, so mean cf_gain was ~0. Per-player attention
@@ -43,32 +44,38 @@ from models.graph_value import GraphValue
 from build_windows import attack_dirs
 from build_graph_windows import possession_tokens, add_velocities, TARGETS
 from score_counterfactual import counterfactual_segment
+from fps import load_fps, win_frames
 
 ROOT = Path(__file__).resolve().parents[1]
 WIN = 75
 VARIANTS = ("frozen", "drift")
 
 
-def window_from_tokens(toks, frames, good, end_frame):
-    """75-frame window ending at end_frame, or None if unavailable."""
+def window_from_tokens(toks, frames, good, end_frame, win=WIN):
+    """3s window ending at end_frame, or None if unavailable."""
     if toks is None:
         return None
     fpos = {f: i for i, f in enumerate(frames)}
     i = fpos.get(end_frame)
-    if i is None or i < WIN - 1 or not good[i - WIN + 1:i + 1].all():
+    if i is None or i < win - 1 or not good[i - win + 1:i + 1].all():
         return None
-    return toks[i - WIN + 1:i + 1]
+    return toks[i - win + 1:i + 1]
 
 
-def variant_window(seg, runner, team, opp, adir, start_frame, end_frame, variant):
+def variant_window(seg, runner, team, opp, adir, start_frame, end_frame,
+                   variant, fps=25.0):
     """Token window for one run under a counterfactual variant."""
-    s = counterfactual_segment(seg, runner, team, start_frame, end_frame, variant)
+    win = win_frames(fps)
+    s = counterfactual_segment(seg, runner, team, start_frame, end_frame,
+                               variant, fps=fps)
     s = add_velocities(s)
     toks, frames, good = possession_tokens(s, team, opp, adir)
-    return window_from_tokens(toks, frames, good, end_frame)
+    return window_from_tokens(toks, frames, good, end_frame, win=win)
 
 
-def score_game(game, model, mu, sd, device, limit=None):
+def score_game(game, model, mu, sd, device, limit=None, out_path=None):
+    fps = load_fps(game)
+    win = win_frames(fps)
     df = pd.read_parquet(ROOT / "data" / "trajectories" / f"{game}.parquet")
     poss = pd.read_parquet(ROOT / "data" / "trajectories" / f"{game}_possessions.parquet")
     runs = pd.read_parquet(ROOT / "data" / "trajectories" / f"{game}_runs_scored.parquet")
@@ -78,6 +85,7 @@ def score_game(game, model, mu, sd, device, limit=None):
     print(f"{game}: scoring {len(runs)} runs (limit={limit})", flush=True)
     pmap = df[["frame", "period"]].drop_duplicates().set_index("frame")["period"]
     adirs = attack_dirs(df, poss)
+    game_frames = np.sort(df["frame"].unique())
 
     # collect windows and score per possession (bounded memory: one
     # possession's windows at a time, not the whole game)
@@ -88,20 +96,24 @@ def score_game(game, model, mu, sd, device, limit=None):
         opp = "away" if team == "home" else "home"
         period = int(pmap.get(p["start_frame"], 1))
         adir = adirs.get((period, team), 1)
-        seg = df[(df["frame"] >= p["start_frame"]) & (df["frame"] <= p["end_frame"])]
+        # Same backward extension as score_runs.py: windows may reach into
+        # the previous possession so boundary runs become scorable.
+        start_pos = int(np.searchsorted(game_frames, p["start_frame"]))
+        lo = game_frames[max(0, start_pos - (win - 1))]
+        seg = df[(df["frame"] >= lo) & (df["frame"] <= p["end_frame"])]
         # actual tokens built once per possession; variants rebuild per run
         toks_a, frames_a, good_a = possession_tokens(
             add_velocities(seg), team, opp, adir)
         recs = []
         for idx, r in g.iterrows():
             ef = int(r["end_frame"])
-            w = {"actual": window_from_tokens(toks_a, frames_a, good_a, ef)}
+            w = {"actual": window_from_tokens(toks_a, frames_a, good_a, ef, win=win)}
             for v in VARIANTS:
                 w[v] = variant_window(seg, r["runner"], team, opp, adir,
-                                      int(r["start_frame"]), ef, v)
-            for variant, win in w.items():
-                if win is not None:
-                    recs.append((idx, variant, win))
+                                      int(r["start_frame"]), ef, v, fps=fps)
+            for variant, w_ in w.items():
+                if w_ is not None:
+                    recs.append((idx, variant, w_))
         if not recs:
             continue
         X = np.stack([r[2] for r in recs]).astype(np.float32)
@@ -120,10 +132,10 @@ def score_game(game, model, mu, sd, device, limit=None):
     for v in VARIANTS:
         runs[f"cf_gain_{v}"] = (runs["value_v2_shot"] -
                                 runs[f"value_cf_{v}_shot"])
-    out = ROOT / "data" / "trajectories" / f"{game}_runs_counterfactual_v2.parquet"
+    out = Path(out_path) if out_path else ROOT / "data" / "trajectories" / f"{game}_runs_counterfactual_v2.parquet"
     runs.to_parquet(out, index=False)
     s = runs.dropna(subset=["cf_gain_frozen"])
-    print(f"{game}: V2-scored {len(s)}/{len(runs)}  "
+    print(f"{game}: fps={fps:g} V2-scored {len(s)}/{len(runs)}  "
           f"mean_cf_gain_frozen={s['cf_gain_frozen'].mean():+.4f}  "
           f"mean_cf_gain_drift={s['cf_gain_drift'].mean():+.4f}")
     return s
